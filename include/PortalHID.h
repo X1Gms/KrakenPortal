@@ -24,11 +24,14 @@ public:
         SkylanderSlot*     slots,
         std::mutex&        portalMutex,
         volatile uint8_t&  changeCounter,
-        volatile uint32_t& usbCommandCounter
+        volatile uint32_t& usbCommandCounter,
+        uint8_t            portalType = 2
     );
 
     void begin();
     void loop(); // Periodic status sender
+    
+    uint8_t getPortalType() const { return _portalType; }
 
     void buildStatusReport(uint8_t out[32]);
     bool sendReport(const uint8_t* data, size_t len);
@@ -52,6 +55,8 @@ private:
 
     uint8_t  _lastChangeCounter = 0;
     unsigned long _lastStatusTx = 0;
+
+    uint8_t _portalType = 2;
 
     std::queue<std::array<uint8_t, 32>> _respQueue;
 

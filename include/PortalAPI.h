@@ -35,6 +35,8 @@ private:
     void _handleGetSlot    (WiFiClient& client, int slot);
     void _handlePostSlot   (WiFiClient& client, int slot, int contentLength, const String& filename);
     void _handleDeleteSlot (WiFiClient& client, int slot);
+    void _handleGetPortalType(WiFiClient& client);
+    void _handleSetPortalType(WiFiClient& client, const String& uri);
 
     void _sendHeader(WiFiClient& client, int code, const String& contentType, size_t bodyLength, const String& extraHeaders = "");
     void _sendError (WiFiClient& client, int code, const String& message);

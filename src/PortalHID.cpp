@@ -7,24 +7,92 @@
 
 SkylandersPortal* g_portalInstance = nullptr;
 
-// Custom HID Report Descriptor for Skylander Traptanium / Spyro Portal of Power
-static const uint8_t portal_report_descriptor[] = {
-    0x06, 0x00, 0xFF,
-    0x09, 0x01,
-    0xA1, 0x01,
-    0x19, 0x01, 0x29, 0x40, 0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x75, 0x08, 0x95, 0x20, 0x81, 0x00,
-    0x19, 0x01, 0x29, 0x40, 0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x75, 0x08, 0x95, 0x20, 0x91, 0x00,
-    0xC0
+// Traptanium HID Report Descriptor (32 bytes IN/OUT, single IN endpoint with EP0 OUT)
+static const uint8_t traptanium_report_descriptor[] = {
+    0x06, 0x00, 0xFF,  // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,        // Usage (0x01)
+    0xA1, 0x01,        // Collection (Application)
+    0x19, 0x01,        //   Usage Minimum (0x01)
+    0x29, 0x40,        //   Usage Maximum (0x40)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
+    0x75, 0x08,        //   Report Size (8)
+    0x95, 0x20,        //   Report Count (32)
+    0x81, 0x00,        //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
+    0x19, 0x01,        //   Usage Minimum (0x01)
+    0x29, 0x40,        //   Usage Maximum (0x40)
+    0x91, 0x00,        //   Output (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0xC0               // End Collection
+};
+
+// Spyro's Adventure HID Report Descriptor (29 bytes IN/OUT) from original KAOS project
+static const uint8_t spyro_report_descriptor[] = {
+    0x06, 0x00, 0xFF,  // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,        // Usage (0x01)
+    0xA1, 0x01,        // Collection (Application)
+    0x19, 0x01,        //   Usage Minimum (0x01)
+    0x29, 0x40,        //   Usage Maximum (0x40)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
+    0x75, 0x08,        //   Report Size (8)
+    0x95, 0x20,        //   Report Count (32)
+    0x81, 0x00,        //   Input (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
+    0x19, 0x01,        //   Usage Minimum (0x01)
+    0x29, 0xFF,        //   Usage Maximum (0xFF)
+    0x91, 0x00,        //   Output (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0xC0               // End Collection
 };
 
 #define PORTAL_EP_IN 0x81
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
-static const uint8_t portal_configuration_descriptor[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(portal_report_descriptor), PORTAL_EP_IN, 32, 1)
+#define CONFIG_TOTAL_LEN_TRAPTANIUM (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+static const uint8_t traptanium_configuration_descriptor[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN_TRAPTANIUM, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(traptanium_report_descriptor), PORTAL_EP_IN, 32, 1)
+};
+
+// Spyro's Adventure Configuration Descriptor (41 bytes, 2 Endpoints IN & OUT) from KAOS
+static const uint8_t spyro_configuration_descriptor[] = {
+    0x09,        // bLength
+    0x02,        // bDescriptorType (Configuration)
+    0x29, 0x00,  // wTotalLength (41 bytes)
+    0x01,        // bNumInterfaces 1
+    0x01,        // bConfigurationValue
+    0x00,        // iConfiguration (String Index)
+    0x80,        // bmAttributes
+    0xFA,        // bMaxPower 500mA
+    
+    0x09,        // bLength
+    0x04,        // bDescriptorType (Interface)
+    0x00,        // bInterfaceNumber 0
+    0x00,        // bAlternateSetting
+    0x02,        // bNumEndpoints 2 (IN and OUT)
+    0x03,        // bInterfaceClass (HID)
+    0x00,        // bInterfaceSubClass
+    0x00,        // bInterfaceProtocol
+    0x00,        // iInterface (String Index)
+    
+    0x09,        // bLength
+    0x21,        // bDescriptorType (HID)
+    0x11, 0x01,  // bcdHID 1.11
+    0x00,        // bCountryCode
+    0x01,        // bNumDescriptors
+    0x22,        // bDescriptorType[0] (HID)
+    0x1D, 0x00,  // wDescriptorLength[0] (29 bytes)
+    
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x81,        // bEndpointAddress (IN/D2H)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x01,        // bInterval 1
+    
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x02,        // bEndpointAddress (OUT/H2D)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x01         // bInterval 1
 };
 
 // -----------------------------------------------------------------------
@@ -34,6 +102,8 @@ static const uint8_t portal_configuration_descriptor[] = {
 extern "C" {
 
 uint8_t const * tud_descriptor_device_cb(void) {
+    uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
+
     static tusb_desc_device_t desc = {
         .bLength            = sizeof(tusb_desc_device_t),
         .bDescriptorType    = TUSB_DESC_DEVICE,
@@ -43,8 +113,8 @@ uint8_t const * tud_descriptor_device_cb(void) {
         .bDeviceProtocol    = 0x00,
         .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
         .idVendor           = PORTAL_USB_VID,
-        .idProduct          = PORTAL_USB_PID,
-        .bcdDevice          = 0x0200,
+        .idProduct          = 0x0150, // Always 0x0150 for PS3/Wii
+        .bcdDevice          = (uint16_t)((pType == 2) ? 0x0200 : 0x0100),
         .iManufacturer      = 0x01,
         .iProduct           = 0x02,
         .iSerialNumber      = 0x03,
@@ -55,18 +125,26 @@ uint8_t const * tud_descriptor_device_cb(void) {
 
 uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
-    return portal_configuration_descriptor;
+    uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
+    if (pType == 2) {
+        return traptanium_configuration_descriptor;
+    }
+    return spyro_configuration_descriptor;
 }
 
 uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void)langid;
     static uint16_t buf[32];
     uint8_t n = 0;
+    
+    uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
+    const char* prodString = "Spyro Porta";
+    if (pType == 2) prodString = "Traptanium Portal";
 
     const char *strs[] = {
         (const char[]){0x09, 0x04}, // 0: English
         PORTAL_USB_MANUFACTURER,    // 1: Manufacturer
-        PORTAL_USB_PRODUCT,         // 2: Product
+        prodString,                 // 2: Product
         PORTAL_USB_SERIAL           // 3: Serial
     };
 
@@ -88,7 +166,11 @@ uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 
 uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance) {
     (void)instance;
-    return portal_report_descriptor;
+    uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
+    if (pType == 2) {
+        return traptanium_report_descriptor;
+    }
+    return spyro_report_descriptor;
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
@@ -118,12 +200,14 @@ SkylandersPortal::SkylandersPortal(
     SkylanderSlot*     slots,
     std::mutex&        portalMutex,
     volatile uint8_t&  changeCounter,
-    volatile uint32_t& usbCommandCounter
+    volatile uint32_t& usbCommandCounter,
+    uint8_t            portalType
 )
     : _slots(slots),
       _mutex(portalMutex),
       _changeCounter(changeCounter),
-      _usbCommandCounter(usbCommandCounter)
+      _usbCommandCounter(usbCommandCounter),
+      _portalType(portalType)
 {
     g_portalInstance = this;
 }
@@ -160,8 +244,15 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
     case 'R': // Reset / Query Model
         _portalActive = true;
         resp[0] = 'R';
-        resp[1] = 0x02; // Traptanium Portal model type
-        resp[2] = 0x18;
+        switch(_portalType) {
+            case 0: // Spyro Portals (Matches KAOS)
+                resp[1] = 0x02; resp[2] = 0x1B;
+                break;
+            case 2: // Traptanium Portal (Default)
+            default:
+                resp[1] = 0x02; resp[2] = 0x18;
+                break;
+        }
         break;
 
     case 'A': // Activate Portal / LED Colors
@@ -180,11 +271,7 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         {
             uint8_t rawIdx = cmd[1];
             uint8_t blk    = cmd[2];
-            uint8_t slot;
-
-            if      (rawIdx >= 0x20) slot = rawIdx - 0x20;
-            else if (rawIdx >= 0x10) slot = rawIdx - 0x10;
-            else                     slot = rawIdx;
+            uint8_t slot = rawIdx & 0x0F;
 
             if (blk == 0 && slot < NUM_SLOTS) {
                 _arrivalPending[slot] = false;
@@ -207,14 +294,10 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         {
             uint8_t rawIdx = cmd[1];
             uint8_t blk    = cmd[2];
-            uint8_t slot;
-
-            if      (rawIdx >= 0x20) slot = rawIdx - 0x20;
-            else if (rawIdx >= 0x10) slot = rawIdx - 0x10;
-            else                     slot = rawIdx;
+            uint8_t slot = rawIdx & 0x0F;
 
             resp[0] = 'W';
-            resp[1] = 0x00;
+            resp[1] = rawIdx; // Echo raw index expected by game
             resp[2] = blk;
 
             if (slot < NUM_SLOTS && blk < 64) {
@@ -258,14 +341,6 @@ void SkylandersPortal::buildStatusReport(uint8_t out[32]) {
     uint32_t bits = 0;
     std::lock_guard<std::mutex> lock(_mutex);
 
-    if (_changeCounter != _lastChangeCounter) {
-        _lastChangeCounter = _changeCounter;
-        for (int i = 0; i < NUM_SLOTS; ++i) {
-            if (_slots[i].occupied && !_wasLoaded[i])  _arrivalPending[i] = true;
-            if (!_slots[i].occupied && _wasLoaded[i]) _removalPending[i] = true;
-        }
-    }
-
     for (int i = 0; i < NUM_SLOTS; ++i) {
         bool loaded = _slots[i].occupied;
 
@@ -276,6 +351,7 @@ void SkylandersPortal::buildStatusReport(uint8_t out[32]) {
         uint32_t slotBits = 0;
         if (_arrivalPending[i]) {
             slotBits = 0x3; // Arrival flag
+            _arrivalPending[i] = false;
         } else if (_removalPending[i]) {
             slotBits = 0x2; // Removal flag
             _removalPending[i] = false;

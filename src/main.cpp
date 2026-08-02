@@ -28,35 +28,50 @@ void setup() {
     delay(500);
     Serial.println("\n[KRAKEN-PORTAL] Starting Skylander ESP32-S3 Portal...");
 
-    // Safe dynamic initialization of FreeRTOS/C++ Mutex
-    portalMutex = new std::mutex();
-    portal      = new SkylandersPortal(slots, *portalMutex, changeCounter, usbCommandCounter);
-    api         = new PortalAPI(slots, changeCounter, *portalMutex, usbCommandCounter, HTTP_PORT);
-
-    // ── 1. USB Native HID setup (Register HID BEFORE starting USB) ──
-    portal->begin();
-
-    USB.manufacturerName(PORTAL_USB_MANUFACTURER);
-    USB.productName(PORTAL_USB_PRODUCT);
-    USB.VID(PORTAL_USB_VID);
-    USB.PID(PORTAL_USB_PID);
-    USB.serialNumber(PORTAL_USB_SERIAL);
-    USB.usbVersion(0x0200);
-    USB.usbClass(0);
-    USB.usbSubClass(0);
-    USB.usbProtocol(0);
-    USB.begin();
-    Serial.printf("[KRAKEN-PORTAL] USB HID Portal of Power initialized (VID: 0x%04X, PID: 0x%04X)\n", PORTAL_USB_VID, PORTAL_USB_PID);
-
-    // ── 2. LittleFS Storage Init ──────────────────────────────
+    // ── 1. LittleFS Storage Init ──────────────────────────────
     if (!LittleFS.begin(true, "/littlefs", 10, "spiffs")) {
         Serial.println("[KRAKEN-PORTAL] LittleFS mount failed — formatting...");
     } else {
         Serial.println("[KRAKEN-PORTAL] LittleFS mounted successfully.");
     }
 
+    uint8_t pType = 2; // Default Traptanium
+    File pFile = LittleFS.open("/portal_type.txt", "r");
+    if (pFile) {
+        String ts = pFile.readString();
+        pType = ts.toInt();
+        pFile.close();
+    }
+    Serial.printf("[KRAKEN-PORTAL] Booting as Portal Type: %d\n", pType);
+
+    // Safe dynamic initialization of FreeRTOS/C++ Mutex
+    portalMutex = new std::mutex();
+    portal      = new SkylandersPortal(slots, *portalMutex, changeCounter, usbCommandCounter, pType);
+    api         = new PortalAPI(slots, changeCounter, *portalMutex, usbCommandCounter, HTTP_PORT);
+
+    // ── 2. USB Native HID setup (Register HID BEFORE starting USB) ──
+    portal->begin();
+
+    USB.manufacturerName(PORTAL_USB_MANUFACTURER);
+    USB.productName((pType == 2) ? "Traptanium Portal" : "Spyro Porta");
+    USB.VID(PORTAL_USB_VID);
+    USB.PID(0x0150); // Hardcoded to 0x0150 as required by PS3 OS
+    USB.serialNumber(PORTAL_USB_SERIAL);
+    USB.usbVersion((pType == 2) ? 0x0200 : 0x0110);
+    USB.usbClass(0);
+    USB.usbSubClass(0);
+    USB.usbProtocol(0);
+    USB.begin();
+    
+    Serial.printf("[KRAKEN-PORTAL] USB HID Portal of Power initialized (VID: 0x%04X, PID: 0x%04X)\n", PORTAL_USB_VID, 0x0150);
+
     // ── 3. WiFi Setup: Static IP STA with AP Fallback ──────────
     WiFi.mode(WIFI_STA);
+    
+    // Power Optimization to prevent brownouts on PS3 USB ports (no external power needed!)
+    WiFi.setSleep(true);                // Enable modem sleep
+    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Reduce TX power to limit current spikes
+
     WiFi.config(PORTAL_IP, PORTAL_GATEWAY, PORTAL_SUBNET, PORTAL_DNS);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("[KRAKEN-PORTAL] Connecting to Home WiFi: " + String(WIFI_SSID));

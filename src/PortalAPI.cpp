@@ -73,11 +73,12 @@ void PortalAPI::handle() {
         }
     }
 
-    // Dispatch routes
     if      (method == "GET"    && uri == "/slots")          _handleGetSlots(client);
     else if (method == "GET"    && uri.startsWith("/slot/")) _handleGetSlot(client,    uri.substring(6).toInt() - 1);
     else if (method == "POST"   && uri.startsWith("/slot/")) _handlePostSlot(client,   uri.substring(6).toInt() - 1, contentLength, filename);
     else if (method == "DELETE" && uri.startsWith("/slot/")) _handleDeleteSlot(client, uri.substring(6).toInt() - 1);
+    else if (method == "GET"    && uri.startsWith("/api/portal_type")) _handleGetPortalType(client);
+    else if (method == "POST"   && uri.startsWith("/api/portal_type")) _handleSetPortalType(client, uri);
     else                                                     _sendError(client, 404, "Not Found");
 
     client.stop();
@@ -320,4 +321,46 @@ void PortalAPI::_sendHeader(WiFiClient& client, int code, const String& contentT
 void PortalAPI::_sendError(WiFiClient& client, int code, const String& message) {
     _sendHeader(client, code, "text/plain; charset=utf-8", message.length());
     client.print(message);
+}
+
+void PortalAPI::_handleGetPortalType(WiFiClient& client) {
+    int currentType = 2; // default
+    File f = LittleFS.open("/portal_type.txt", "r");
+    if (f) {
+        String ts = f.readString();
+        currentType = ts.toInt();
+        f.close();
+    }
+    String json = "{\"type\":" + String(currentType) + "}";
+    _sendHeader(client, 200, "application/json", json.length());
+    client.print(json);
+}
+
+void PortalAPI::_handleSetPortalType(WiFiClient& client, const String& uri) {
+    int pos = uri.indexOf("type=");
+    if (pos == -1) {
+        _sendError(client, 400, "Missing type parameter");
+        return;
+    }
+    
+    int type = uri.substring(pos + 5).toInt();
+    if (type != 0 && type != 2) {
+        _sendError(client, 400, "Invalid type (must be 0 or 2)");
+        return;
+    }
+
+    File f = LittleFS.open("/portal_type.txt", "w");
+    if (f) {
+        f.print(type);
+        f.close();
+        
+        String msg = "Portal type saved! Rebooting...";
+        _sendHeader(client, 200, "text/plain", msg.length());
+        client.print(msg);
+        
+        delay(500);
+        ESP.restart();
+    } else {
+        _sendError(client, 500, "Failed to save configuration");
+    }
 }
