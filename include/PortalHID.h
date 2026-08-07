@@ -25,7 +25,7 @@ public:
         std::mutex&        portalMutex,
         volatile uint8_t&  changeCounter,
         volatile uint32_t& usbCommandCounter,
-        uint8_t            portalType = 2
+        uint8_t            portalType = 1
     );
 
     void begin();
@@ -56,7 +56,7 @@ private:
     uint8_t  _lastChangeCounter = 0;
     unsigned long _lastStatusTx = 0;
 
-    uint8_t _portalType = 2;
+    uint8_t _portalType = 1;
 
     std::queue<std::array<uint8_t, 32>> _respQueue;
 

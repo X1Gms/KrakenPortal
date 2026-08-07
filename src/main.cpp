@@ -11,7 +11,7 @@
 
 #include "PortalConfig.h"
 #include "PortalHID.h"
-#include "PortalAPI.h"
+#include "PortalWebSocket.h"
 
 // ── Shared State ─────────────────────────────────────────────
 SkylanderSlot     slots[NUM_SLOTS];
@@ -21,7 +21,7 @@ volatile uint32_t usbCommandCounter = 0;
 
 // ── Pointers for safe dynamic construction ───────────────────
 SkylandersPortal* portal = nullptr;
-PortalAPI*        api    = nullptr;
+PortalWebSocket*  wsApi  = nullptr;
 
 void setup() {
     Serial.begin(115200);
@@ -35,7 +35,7 @@ void setup() {
         Serial.println("[KRAKEN-PORTAL] LittleFS mounted successfully.");
     }
 
-    uint8_t pType = 2; // Default Traptanium
+    uint8_t pType = 1; // Default Spyro's Adventure Portal Type
     File pFile = LittleFS.open("/portal_type.txt", "r");
     if (pFile) {
         String ts = pFile.readString();
@@ -47,17 +47,19 @@ void setup() {
     // Safe dynamic initialization of FreeRTOS/C++ Mutex
     portalMutex = new std::mutex();
     portal      = new SkylandersPortal(slots, *portalMutex, changeCounter, usbCommandCounter, pType);
-    api         = new PortalAPI(slots, changeCounter, *portalMutex, usbCommandCounter, HTTP_PORT);
+    wsApi       = new PortalWebSocket(slots, changeCounter, *portalMutex, HTTP_PORT);
 
     // ── 2. USB Native HID setup (Register HID BEFORE starting USB) ──
     portal->begin();
 
     USB.manufacturerName(PORTAL_USB_MANUFACTURER);
-    USB.productName((pType == 2) ? "Traptanium Portal" : "Spyro Porta");
+    // USB.productName((pType == 2) ? "Traptanium Portal" : "Spyro Porta");
+    USB.productName("Spyro Porta");
     USB.VID(PORTAL_USB_VID);
     USB.PID(0x0150); // Hardcoded to 0x0150 as required by PS3 OS
     USB.serialNumber(PORTAL_USB_SERIAL);
-    USB.usbVersion((pType == 2) ? 0x0200 : 0x0110);
+    // USB.usbVersion((pType == 2) ? 0x0200 : 0x0110);
+    USB.usbVersion(0x0110);
     USB.usbClass(0);
     USB.usbSubClass(0);
     USB.usbProtocol(0);
@@ -122,29 +124,77 @@ void setup() {
         changeCounter = 1; // Signal USB HID status report
     }
 
-    // ── 5. Start HTTP API Server ──────────────────────────────
-    api->begin();
+    // ── 5. Start WebSocket API Server ──────────────────────────────
+    wsApi->begin();
+
     Serial.println("[KRAKEN-PORTAL] System ready!");
 }
 
+// Global debounce state for LittleFS saves
+unsigned long slot_modified_time[NUM_SLOTS] = {0};
+bool slot_pending_save[NUM_SLOTS] = {false};
+
 void loop() {
-    // Process incoming HTTP requests from Flutter App
-    if (api) api->handle();
+    // Process incoming WebSocket messages
+    if (wsApi) wsApi->loop();
 
     // Process periodic USB HID status reporting (50ms interval)
     if (portal) portal->loop();
 
-    // Deferred Save: Write console-modified slots back to LittleFS
+    // Deferred Save: Write console-modified or API-modified slots back to LittleFS with a 1-second debounce
     for (int i = 0; i < NUM_SLOTS; ++i) {
-        if (slots[i].is_modified) {
+        {
             std::lock_guard<std::mutex> lock(*portalMutex);
-            slots[i].is_modified = false;
+            if (slots[i].is_modified) {
+                slots[i].is_modified = false;
+                slot_pending_save[i] = true;
+                slot_modified_time[i] = millis();
+            }
+        }
 
-            File f = LittleFS.open("/active_" + String(i) + ".bin", "w");
-            if (f) {
-                f.write(slots[i].dump_data, FIGURE_SIZE);
-                f.close();
+        // Only save to LittleFS if pending and stable for 1000ms
+        if (slot_pending_save[i] && (millis() - slot_modified_time[i] > 1000)) {
+            slot_pending_save[i] = false;
+            
+            bool is_occupied = false;
+            String f_name = "";
+            uint8_t* buffer = nullptr;
+
+            {
+                std::lock_guard<std::mutex> lock(*portalMutex);
+                is_occupied = slots[i].occupied;
+                
+                if (is_occupied) {
+                    f_name = slots[i].file_name;
+                    buffer = (uint8_t*)malloc(FIGURE_SIZE);
+                    if (buffer) {
+                        memcpy(buffer, slots[i].dump_data, FIGURE_SIZE);
+                    }
+                }
+            }
+
+            String binPath = "/active_" + String(i) + ".bin";
+            String namePath = "/active_" + String(i) + ".name";
+
+            if (is_occupied) {
+                File f = LittleFS.open(binPath, "w");
+                if (f && buffer) {
+                    f.write(buffer, FIGURE_SIZE);
+                    f.close();
+                }
+                if (buffer) {
+                    free(buffer);
+                }
+                File nf = LittleFS.open(namePath, "w");
+                if (nf) {
+                    nf.print(f_name);
+                    nf.close();
+                }
                 Serial.printf("[KRAKEN-PORTAL] Deferred save: slot %d updated on LittleFS\n", i + 1);
+            } else {
+                LittleFS.remove(binPath);
+                LittleFS.remove(namePath);
+                Serial.printf("[KRAKEN-PORTAL] Deferred save: slot %d removed from LittleFS\n", i + 1);
             }
         }
     }

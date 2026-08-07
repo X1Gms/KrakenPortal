@@ -114,7 +114,8 @@ uint8_t const * tud_descriptor_device_cb(void) {
         .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
         .idVendor           = PORTAL_USB_VID,
         .idProduct          = 0x0150, // Always 0x0150 for PS3/Wii
-        .bcdDevice          = (uint16_t)((pType == 2) ? 0x0200 : 0x0100),
+        // .bcdDevice          = (uint16_t)((pType == 2) ? 0x0200 : 0x0100),
+        .bcdDevice          = (uint16_t)(0x0100),
         .iManufacturer      = 0x01,
         .iProduct           = 0x02,
         .iSerialNumber      = 0x03,
@@ -126,9 +127,9 @@ uint8_t const * tud_descriptor_device_cb(void) {
 uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
     uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
-    if (pType == 2) {
-        return traptanium_configuration_descriptor;
-    }
+    // if (pType == 2) {
+    //     return traptanium_configuration_descriptor;
+    // }
     return spyro_configuration_descriptor;
 }
 
@@ -139,7 +140,7 @@ uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     
     uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
     const char* prodString = "Spyro Porta";
-    if (pType == 2) prodString = "Traptanium Portal";
+    // if (pType == 2) prodString = "Traptanium Portal";
 
     const char *strs[] = {
         (const char[]){0x09, 0x04}, // 0: English
@@ -167,9 +168,9 @@ uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance) {
     (void)instance;
     uint8_t pType = g_portalInstance ? g_portalInstance->getPortalType() : 2;
-    if (pType == 2) {
-        return traptanium_report_descriptor;
-    }
+    // if (pType == 2) {
+    //     return traptanium_report_descriptor;
+    // }
     return spyro_report_descriptor;
 }
 
