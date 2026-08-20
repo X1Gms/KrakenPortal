@@ -14,20 +14,11 @@
 // ── Network Configuration ─────────────────────────────────────
 #define HTTP_PORT    8080   // HTTP server port (aligned with Flutter AppSettings.ipAddress)
 
-// WiFi Station Mode (Connects to your home WiFi)
-#define WIFI_SSID     "NOS-C364"
-#define WIFI_PASSWORD "NXCMHZNM"
-
 // Static IP Configuration (Home Network)
 const IPAddress PORTAL_IP(192, 168, 1, 200);
 const IPAddress PORTAL_GATEWAY(192, 168, 1, 1);
 const IPAddress PORTAL_SUBNET(255, 255, 255, 0);
 const IPAddress PORTAL_DNS(192, 168, 1, 1);
-
-// Fallback Access Point (Used if Home WiFi is unreachable)
-#define AP_SSID       "Skylander-Portal-S3"
-#define AP_PASSWORD   "skylander123"
-const IPAddress AP_IP(192, 168, 4, 1);
 
 // ── USB HID Identifiers (Traptanium Portal) ───────────────────────────────────────
 #define PORTAL_USB_VID          0x1430

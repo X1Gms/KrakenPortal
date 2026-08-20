@@ -199,13 +199,11 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 
 SkylandersPortal::SkylandersPortal(
     SkylanderSlot*     slots,
-    std::mutex&        portalMutex,
     volatile uint8_t&  changeCounter,
     volatile uint32_t& usbCommandCounter,
     uint8_t            portalType
 )
     : _slots(slots),
-      _mutex(portalMutex),
       _changeCounter(changeCounter),
       _usbCommandCounter(usbCommandCounter),
       _portalType(portalType)
@@ -214,14 +212,17 @@ SkylandersPortal::SkylandersPortal(
 }
 
 void SkylandersPortal::begin() {
-    USB.begin(); // Initializes the PHY. Descriptors will be picked up from our global TinyUSB callbacks.
+    // USB.begin() is called in main.cpp after descriptors are set
     Serial.println("[HID] USB HID Portal of Power initialized.");
 }
 
 void SkylandersPortal::handleOutput(const uint8_t* buffer, uint16_t len) {
-    if (len >= 1) {
+    uint16_t offset = 0;
+    // Fix unsigned underflow: compare offset directly to len
+    while (offset < len) {
         _usbCommandCounter++;
-        _handleCommand(buffer, len);
+        _handleCommand(buffer + offset, len - offset);
+        offset += 32;
     }
 }
 
@@ -238,8 +239,11 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
     uint8_t resp[32];
     memset(resp, 0, sizeof(resp));
     bool hasResp = true;
+    _lastCmdTime = millis();
 
-    Serial.printf("[USB-HID] PS3 Command: %c (0x%02X)\n", (cmd[0] >= 32 && cmd[0] <= 126) ? cmd[0] : '?', cmd[0]);
+    // Removed Serial.printf here! Logging every command fills the UART TX buffer
+    // and blocks the TinyUSB task during heavy traffic (like level transitions),
+    // causing the PS3 to timeout and drop the portal connection.
 
     switch (cmd[0]) {
     case 'R': // Reset / Query Model
@@ -265,7 +269,7 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         break;
 
     case 'S': // Query Status
-        buildStatusReport(resp);
+        buildStatusReport(resp, true); // <--- TRUE means it's an explicit query from the game
         break;
 
     case 'Q': // Read 16-byte block from Skylander figure
@@ -281,10 +285,13 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
             resp[0] = 'Q';
             resp[2] = blk;
 
-            std::lock_guard<std::mutex> lock(_mutex);
             if (slot < NUM_SLOTS && _slots[slot].occupied && blk < 64) {
                 resp[1] = rawIdx; // Echo raw index expected by game
                 memcpy(&resp[3], &_slots[slot].dump_data[blk * 16], 16);
+                
+                Serial.printf("[HID-READ] PS3 read Slot %d, Block %02d | Hex: ", slot, blk);
+                for(int i=0; i<16; i++) { Serial.printf("%02X ", resp[3+i]); }
+                Serial.println();
             } else {
                 resp[1] = 0x01; // Slot empty or block out of range
             }
@@ -297,15 +304,19 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
             uint8_t blk    = cmd[2];
             uint8_t slot = rawIdx & 0x0F;
 
+            Serial.printf("[HID-WRITE] PS3 wrote Slot %d, Block %02d | Hex: ", slot, blk);
+            for(int i=0; i<16; i++) { Serial.printf("%02X ", cmd[3+i]); }
+            Serial.println();
+
             resp[0] = 'W';
             resp[1] = rawIdx; // Echo raw index expected by game
             resp[2] = blk;
 
-            if (slot < NUM_SLOTS && blk < 64) {
-                std::lock_guard<std::mutex> lock(_mutex);
+            if (slot < NUM_SLOTS && blk < (FIGURE_SIZE / 16)) {
                 if (_slots[slot].occupied) {
                     memcpy(&_slots[slot].dump_data[blk * 16], &cmd[3], 16);
                     _slots[slot].is_modified = true;
+                    _slots[slot].last_modified_time = millis();
                 }
             }
         }
@@ -326,36 +337,47 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
     }
 
     if (hasResp) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        if (_respQueue.size() < 16) {
-            std::array<uint8_t, 32> pkt;
-            memcpy(pkt.data(), resp, 32);
-            _respQueue.push(pkt);
+        if (tud_hid_n_ready(0)) {
+            tud_hid_n_report(0, 0, resp, 32);
+        } else {
+            Serial.println("[ERROR] HID NOT READY, DROPPED RESPONSE");
         }
     }
 }
 
-void SkylandersPortal::buildStatusReport(uint8_t out[32]) {
+void SkylandersPortal::buildStatusReport(uint8_t out[32], bool is_query) {
     memset(out, 0, 32);
     out[0] = 'S';
 
     uint32_t bits = 0;
-    std::lock_guard<std::mutex> lock(_mutex);
-
+    
     for (int i = 0; i < NUM_SLOTS; ++i) {
         bool loaded = _slots[i].occupied;
 
-        if (loaded && !_wasLoaded[i])  _arrivalPending[i] = true;
-        if (!loaded && _wasLoaded[i]) _removalPending[i] = true;
+        if (loaded && !_wasLoaded[i]) {
+            _arrivalPending[i] = true;
+            _removalPending[i] = false; // <-- MATA O FANTASMA DA REMOÇÃO
+            Serial.printf("[STATE] Slot %d INSERTED\n", i);
+        }
+        if (!loaded && _wasLoaded[i]) {
+            _removalPending[i] = true;
+            _arrivalPending[i] = false; // <-- MATA O FANTASMA DA INSERÇÃO
+            Serial.printf("[STATE] Slot %d REMOVED\n", i);
+        }
         _wasLoaded[i] = loaded;
 
         uint32_t slotBits = 0;
         if (_arrivalPending[i]) {
             slotBits = 0x3; // Arrival flag
-            _arrivalPending[i] = false;
+            // DO NOT clear _arrivalPending here! 
+            // It MUST remain true until the game successfully reads Block 0 using 'Q' command!
         } else if (_removalPending[i]) {
             slotBits = 0x2; // Removal flag
-            _removalPending[i] = false;
+            if (is_query) {
+                // Only clear the removal flag if the host explicitly asked for an 'S' report,
+                // ensuring the host definitely received it.
+                _removalPending[i] = false;
+            }
         } else if (loaded) {
             slotBits = 0x1; // Loaded & present
         }
@@ -379,25 +401,22 @@ bool SkylandersPortal::sendReport(const uint8_t* data, size_t len) {
 }
 
 void SkylandersPortal::loop() {
-    if (tud_mounted() && tud_hid_n_ready(0)) {
-        bool sent = false;
-        
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            if (!_respQueue.empty()) {
-                auto pkt = _respQueue.front();
-                _respQueue.pop();
-                tud_hid_n_report(0, 0, pkt.data(), 32);
-                _lastStatusTx = millis();
-                sent = true;
+    if (tud_mounted()) {
+        if (_lastCmdTime > 0 && millis() - _lastCmdTime > 2000) {
+            if (millis() - _lastTimeoutWarnTime > 2000) {
+                Serial.println("[WARN] PS3 SILENCE > 2000ms! (Timeout or Game Paused)");
+                _lastTimeoutWarnTime = millis();
             }
         }
 
-        if (!sent && (millis() - _lastStatusTx >= 20)) {
-            _lastStatusTx = millis();
-            uint8_t statusPkt[32];
-            buildStatusReport(statusPkt);
-            tud_hid_n_report(0, 0, statusPkt, 32);
+        if (_changeCounter != _lastChangeCounter) {
+            if (tud_hid_n_ready(0)) {
+                _lastChangeCounter = _changeCounter;
+                uint8_t statusPkt[32];
+                buildStatusReport(statusPkt, false); // false = Background push, do not clear removal flags
+                tud_hid_n_report(0, 0, statusPkt, 32);
+                Serial.println("[HID] Pushed unsolicited state change to PS3");
+            }
         }
     }
 }

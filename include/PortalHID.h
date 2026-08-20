@@ -1,6 +1,5 @@
 #pragma once
 #include <Arduino.h>
-#include <mutex>
 #include <queue>
 #include <array>
 #include "USB.h"
@@ -16,13 +15,13 @@ struct SkylanderSlot {
     bool    occupied    = false;
     String  file_name   = "";
     bool    is_modified = false;
+    uint32_t last_modified_time = 0;
 };
 
 class SkylandersPortal {
 public:
     SkylandersPortal(
         SkylanderSlot*     slots,
-        std::mutex&        portalMutex,
         volatile uint8_t&  changeCounter,
         volatile uint32_t& usbCommandCounter,
         uint8_t            portalType = 1
@@ -33,7 +32,7 @@ public:
     
     uint8_t getPortalType() const { return _portalType; }
 
-    void buildStatusReport(uint8_t out[32]);
+    void buildStatusReport(uint8_t out[32], bool is_query = false);
     bool sendReport(const uint8_t* data, size_t len);
 
     // Callbacks for TinyUSB
@@ -42,7 +41,6 @@ public:
 
 private:
     SkylanderSlot*     _slots;
-    std::mutex&        _mutex;
     volatile uint8_t&  _changeCounter;
     volatile uint32_t& _usbCommandCounter;
 
@@ -55,10 +53,11 @@ private:
 
     uint8_t  _lastChangeCounter = 0;
     unsigned long _lastStatusTx = 0;
+    unsigned long _lastCmdTime = 0;
+    unsigned long _lastQueueWarnTime = 0;
+    unsigned long _lastTimeoutWarnTime = 0;
 
     uint8_t _portalType = 1;
-
-    std::queue<std::array<uint8_t, 32>> _respQueue;
 
     void _handleCommand(const uint8_t* cmd, uint16_t len);
 };

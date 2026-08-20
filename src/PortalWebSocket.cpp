@@ -1,27 +1,22 @@
 #include "PortalWebSocket.h"
-#include <ArduinoJson.h>
+#include "ConfigManager.h"
 #include "mbedtls/aes.h"
-#include "mbedtls/base64.h"
+#include "mbedtls/sha256.h"
 
-// 32-byte Key for AES-256 (null terminator ignored)
-static const unsigned char aes_key[32] = {
-    'S','k','y','l','a','n','d','e','r','P','o','r','t','a','l',
-    'S','u','p','e','r','S','e','c','r','e','t','K','e','y','1','2','3'
-};
-// 16-byte IV for CBC (null terminator ignored)
-static const unsigned char aes_iv_orig[16] = {
-    'P','o','r','t','a','l','I','n','i','t','i','a','l','V','e','c'
-};
+// We dynamically generate the AES key based on the token
+static void get_aes_key(unsigned char* out_key) {
+    String token = ConfigManager::getToken();
+    if (token == "") token = "SkylanderPortalSuperSecretKey123";
+    mbedtls_sha256((const unsigned char*)token.c_str(), token.length(), out_key, 0);
+}
 
 PortalWebSocket::PortalWebSocket(
     SkylanderSlot*     slots,
     volatile uint8_t&  changeCounter,
-    std::mutex&        portalMutex,
     uint16_t           port
 ) : _webSocket(port), 
     _slots(slots), 
     _changeCounter(changeCounter), 
-    _mutex(portalMutex),
     _lastChangeCounter(255) 
 {}
 
@@ -30,16 +25,44 @@ void PortalWebSocket::begin() {
     _webSocket.onEvent([this](uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
         this->_onWebSocketEvent(num, type, payload, length);
     });
-    Serial.println("[KRAKEN-WS] WebSocket server started.");
+    Serial.println("[KRAKEN-WS] Binary WebSocket server started.");
 }
 
 void PortalWebSocket::loop() {
     _webSocket.loop();
     
-    // Check if slots changed (e.g., figure added/removed by USB)
+    bool needsBroadcast = false;
+    
+    // Check for physical insertion/removal changes (from HID)
     uint8_t currentCounter = _changeCounter;
     if (currentCounter != _lastChangeCounter) {
         _lastChangeCounter = currentCounter;
+        needsBroadcast = true;
+    }
+    
+    // Check for modification state changes (from PS3 Writes)
+    static unsigned long lastModifiedCheck = 0;
+    if (millis() - lastModifiedCheck > 100) {
+        lastModifiedCheck = millis();
+        for(int i = 0; i < NUM_SLOTS; i++) {
+            if (_slots[i].occupied && _slots[i].is_modified) {
+                // Debounce: Only broadcast if the PS3 has stopped writing for 1000ms
+                if (millis() - _slots[i].last_modified_time > 1000) {
+                    if (!_lastModifiedState[i]) {
+                        _lastModifiedState[i] = true;
+                        needsBroadcast = true;
+                    }
+                }
+            } else {
+                if (_lastModifiedState[i]) {
+                    _lastModifiedState[i] = false;
+                    needsBroadcast = true;
+                }
+            }
+        }
+    }
+    
+    if (needsBroadcast) {
         _broadcastSlots();
     }
 }
@@ -51,211 +74,269 @@ void PortalWebSocket::_onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * pa
             break;
         case WStype_CONNECTED:
             Serial.printf("[KRAKEN-WS] [%u] Connected!\n", num);
-            // Immediately send current state on connect
+            // Disconnect any ghost connections to prevent the 5-client limit lockout
+            for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++) {
+                if (i != num) {
+                    _webSocket.disconnect(i);
+                }
+            }
             _lastChangeCounter = _changeCounter - 1; // force trigger
             break;
-        case WStype_TEXT: {
-            String msg = String((char*)payload, length);
-            _handleMessage(num, msg);
+        case WStype_BIN: {
+            _handleMessage(num, payload, length);
             break;
         }
+        case WStype_TEXT:
+            Serial.println("[KRAKEN-WS] Ignored WStype_TEXT. Only BIN supported.");
+            break;
         default:
             break;
     }
 }
 
 void PortalWebSocket::_broadcastSlots() {
-    JsonDocument doc;
-    JsonArray arr = doc.to<JsonArray>();
+    uint8_t plain[600];
+    size_t offset = 0;
+    
+    plain[offset++] = 0x81;
+    plain[offset++] = NUM_SLOTS;
     
     {
-        std::lock_guard<std::mutex> lock(_mutex);
         for (int i = 0; i < NUM_SLOTS; i++) {
-            JsonObject obj = arr.add<JsonObject>();
-            obj["slot"] = i + 1;
-            obj["occupied"] = _slots[i].occupied;
-            obj["file_name"] = _slots[i].file_name;
-            obj["is_modified"] = _slots[i].is_modified;
+            plain[offset++] = i + 1;
+            plain[offset++] = _slots[i].occupied ? 1 : 0;
+            plain[offset++] = _slots[i].is_modified ? 1 : 0;
+            
+            size_t nameLen = _slots[i].file_name.length();
+            if (nameLen > 32) nameLen = 32;
+            plain[offset++] = (uint8_t)nameLen;
+            
+            if (nameLen > 0) {
+                memcpy(&plain[offset], _slots[i].file_name.c_str(), nameLen);
+                offset += nameLen;
+            }
         }
     }
     
-    String jsonStr;
-    serializeJson(doc, jsonStr);
-    
-    // Encrypt the payload before sending
-    String encrypted = _encryptAES(jsonStr);
-    _webSocket.broadcastTXT(encrypted);
+    uint8_t* cipher = nullptr;
+    size_t cipherLen = _encryptAES(plain, offset, &cipher);
+    if (cipher && cipherLen > 0) {
+        _webSocket.broadcastBIN(cipher, cipherLen);
+        free(cipher);
+    }
 }
 
-void PortalWebSocket::_handleMessage(uint8_t num, const String& msg) {
-    // Decrypt incoming message
-    String decrypted = _decryptAES(msg);
-    if (decrypted.isEmpty()) return;
+void PortalWebSocket::_handleMessage(uint8_t num, const uint8_t* payload, size_t length) {
+    uint8_t* decrypted = nullptr;
+    size_t decLen = _decryptAES(payload, length, &decrypted);
+    if (!decrypted || decLen < 7) {
+        if (decrypted) free(decrypted);
+        return;
+    }
     
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, decrypted);
-    if (err) return;
-    
-    String action = doc["action"] | "";
-    int slot = doc["slot"] | -1;
-    String reqId = doc["req_id"] | "";
+    uint8_t action = decrypted[0]; // 1 = GET, 2 = POST, 3 = DELETE
+    uint8_t slot = decrypted[1];
+    uint32_t reqId = *((uint32_t*)&decrypted[2]);
+    uint8_t nameLen = decrypted[6];
     
     bool success = false;
+    uint8_t* responseData = nullptr;
+    size_t responseLen = 0;
 
-    if (action == "GET") {
+    if (action == 0x01) { // GET
         _lastChangeCounter = _changeCounter - 1;
-        Serial.println("[KRAKEN-WS] Forced broadcast via GET API");
         success = true;
     }
     else if (slot >= 1 && slot <= NUM_SLOTS) {
-        if (action == "DELETE") {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _slots[slot - 1].occupied = false;
-            _slots[slot - 1].file_name = "";
-            _slots[slot - 1].is_modified = true;
-            memset(_slots[slot - 1].dump_data, 0, FIGURE_SIZE);
-            _changeCounter++;
-            Serial.printf("[KRAKEN-WS] Slot %d cleared via API\n", slot);
-            success = true;
-        }
-        else if (action == "POST") {
-            String filename = doc["filename"] | "unknown.dump";
-            String b64data = doc["data"] | "";
-            
-            if (b64data.length() > 0) {
-                size_t decodedLen = 0;
-                unsigned char* decoded = (unsigned char*)malloc(b64data.length());
-                if (decoded) {
-                    mbedtls_base64_decode(decoded, b64data.length(), &decodedLen, (const unsigned char*)b64data.c_str(), b64data.length());
-                    
-                    if (decodedLen == FIGURE_SIZE) {
-                        std::lock_guard<std::mutex> lock(_mutex);
-                        memcpy(_slots[slot - 1].dump_data, decoded, FIGURE_SIZE);
-                        _slots[slot - 1].file_name = filename;
-                        _slots[slot - 1].is_modified = true;
-                        _slots[slot - 1].occupied = true;
-                        _changeCounter++;
-                        Serial.printf("[KRAKEN-WS] Slot %d loaded via API: %s\n", slot, filename.c_str());
-                        success = true;
+        if (action == 0x03) { // DELETE
+            bool has_dump = false;
+            {
+                if (_slots[slot - 1].occupied) {
+                    responseData = (uint8_t*)malloc(FIGURE_SIZE);
+                    if (responseData) {
+                        memcpy(responseData, _slots[slot - 1].dump_data, FIGURE_SIZE);
+                        responseLen = FIGURE_SIZE;
+                        has_dump = true;
                     }
-                    free(decoded);
+                }
+                _slots[slot - 1].occupied = false;
+                _slots[slot - 1].file_name = "";
+                _slots[slot - 1].is_modified = true;
+                memset(_slots[slot - 1].dump_data, 0, FIGURE_SIZE);
+                _changeCounter++;
+                Serial.printf("[KRAKEN-WS] Slot %d cleared via API\n", slot);
+                success = true;
+            }
+        }
+        else if (action == 0x02) { // POST
+            if (decLen >= 7 + nameLen + FIGURE_SIZE) {
+                char fname[64] = {0};
+                if (nameLen > 0 && nameLen < 63) {
+                    memcpy(fname, &decrypted[7], nameLen);
+                }
+                
+                {
+                    memcpy(_slots[slot - 1].dump_data, &decrypted[7 + nameLen], FIGURE_SIZE);
+                    _slots[slot - 1].file_name = String(fname);
+                    _slots[slot - 1].is_modified = false; // We just uploaded it, no need to sync back!
+                    _slots[slot - 1].occupied = true;
+                    _changeCounter++;
+                    
+                    Serial.printf("[KRAKEN-WS] Slot %d loaded via API: %s\n", slot, fname);
+                    Serial.println("[KRAKEN-WS] HEX DUMP OF INSERTED FIGURE:");
+                    for (int blk = 0; blk < 64; blk++) {
+                        Serial.printf("Block %02d: ", blk);
+                        for(int i=0; i<16; i++) { Serial.printf("%02X ", _slots[slot - 1].dump_data[blk*16 + i]); }
+                        Serial.println();
+                    }
+                }
+                success = true;
+            }
+        }
+        else if (action == 0x04) { // SYNC
+            if (_slots[slot - 1].occupied && _slots[slot - 1].is_modified) {
+                responseData = (uint8_t*)malloc(FIGURE_SIZE);
+                if (responseData) {
+                    memcpy(responseData, _slots[slot - 1].dump_data, FIGURE_SIZE);
+                    responseLen = FIGURE_SIZE;
+                    _slots[slot - 1].is_modified = false;
+                    
+                    Serial.printf("[KRAKEN-WS] Slot %d auto-synced to App\n", slot);
+                    Serial.println("[KRAKEN-WS] HEX DUMP OF SYNCED FIGURE:");
+                    for (int blk = 0; blk < 64; blk++) {
+                        Serial.printf("Block %02d: ", blk);
+                        for(int i=0; i<16; i++) { Serial.printf("%02X ", responseData[blk*16 + i]); }
+                        Serial.println();
+                    }
+                    success = true;
                 }
             }
         }
     }
 
-    if (!reqId.isEmpty()) {
-        JsonDocument ackDoc;
-        ackDoc["ack"] = reqId;
-        ackDoc["status"] = success ? "success" : "error";
-        String ackStr;
-        serializeJson(ackDoc, ackStr);
-        String encryptedAck = _encryptAES(ackStr);
-        if (!encryptedAck.isEmpty()) {
-            _webSocket.sendTXT(num, encryptedAck);
+    if (reqId != 0) {
+        size_t ackPlainLen = 6 + responseLen;
+        uint8_t* ackPlain = (uint8_t*)malloc(ackPlainLen);
+        if (ackPlain) {
+            ackPlain[0] = 0x80;
+            ackPlain[1] = success ? 1 : 0;
+            memcpy(&ackPlain[2], &reqId, 4);
+            if (responseLen > 0 && responseData) {
+                memcpy(&ackPlain[6], responseData, responseLen);
+            }
+            
+            uint8_t* ackCipher = nullptr;
+            size_t ackCipherLen = _encryptAES(ackPlain, ackPlainLen, &ackCipher);
+            if (ackCipher && ackCipherLen > 0) {
+                _webSocket.sendBIN(num, ackCipher, ackCipherLen);
+                free(ackCipher);
+            }
+            free(ackPlain);
         }
     }
+    
+    if (responseData) free(responseData);
+    if (decrypted) free(decrypted);
 }
 
-String PortalWebSocket::_encryptAES(const String& payload) {
+size_t PortalWebSocket::_encryptAES(const uint8_t* payload, size_t payloadLen, uint8_t** outCiphertext) {
+    if (!payload || payloadLen == 0 || !outCiphertext) return 0;
+    
+    unsigned char dynamic_key[32];
+    get_aes_key(dynamic_key);
+    
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_enc(&aes, aes_key, 256);
+    mbedtls_aes_setkey_enc(&aes, dynamic_key, 256);
     
-    size_t payloadLen = payload.length();
     uint8_t padding = 16 - (payloadLen % 16);
     size_t paddedLen = payloadLen + padding;
     
-    unsigned char* input = (unsigned char*)malloc(paddedLen);
-    unsigned char* output = (unsigned char*)malloc(paddedLen);
+    uint8_t* input = (uint8_t*)malloc(paddedLen);
+    uint8_t* output = (uint8_t*)malloc(paddedLen);
     if (!input || !output) {
         if (input) free(input);
         if (output) free(output);
         mbedtls_aes_free(&aes);
-        return "";
+        *outCiphertext = nullptr;
+        return 0;
     }
 
-    memcpy(input, payload.c_str(), payloadLen);
+    memcpy(input, payload, payloadLen);
     for (size_t i = payloadLen; i < paddedLen; i++) {
         input[i] = padding;
     }
     
-    unsigned char iv[16];
+    uint8_t iv[16];
     esp_fill_random(iv, 16);
     
-    unsigned char iv_copy[16];
+    uint8_t iv_copy[16];
     memcpy(iv_copy, iv, 16);
     
     mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, paddedLen, iv_copy, input, output);
     mbedtls_aes_free(&aes);
     
     size_t combinedLen = 16 + paddedLen;
-    unsigned char* combined = (unsigned char*)malloc(combinedLen);
+    uint8_t* combined = (uint8_t*)malloc(combinedLen);
     if (!combined) {
         free(input);
         free(output);
-        return "";
+        *outCiphertext = nullptr;
+        return 0;
     }
     
     memcpy(combined, iv, 16);
     memcpy(combined + 16, output, paddedLen);
     
-    size_t b64Len = 0;
-    mbedtls_base64_encode(nullptr, 0, &b64Len, combined, combinedLen);
-    unsigned char* b64Out = (unsigned char*)malloc(b64Len);
-    if (!b64Out) {
-        free(input);
-        free(output);
-        free(combined);
-        return "";
-    }
-    
-    mbedtls_base64_encode(b64Out, b64Len, &b64Len, combined, combinedLen);
-    String result = String((char*)b64Out);
-    
     free(input);
     free(output);
-    free(combined);
-    free(b64Out);
     
-    return result;
+    *outCiphertext = combined;
+    return combinedLen;
 }
 
-String PortalWebSocket::_decryptAES(const String& ciphertextBase64) {
-    size_t decodedLen = 0;
-    mbedtls_base64_decode(nullptr, 0, &decodedLen, (const unsigned char*)ciphertextBase64.c_str(), ciphertextBase64.length());
-    if (decodedLen < 32 || (decodedLen - 16) % 16 != 0) return "";
+size_t PortalWebSocket::_decryptAES(const uint8_t* ciphertext, size_t cipherLen, uint8_t** outPlaintext) {
+    if (!ciphertext || cipherLen < 32 || (cipherLen - 16) % 16 != 0 || !outPlaintext) return 0;
     
-    unsigned char* decoded = (unsigned char*)malloc(decodedLen);
-    if (!decoded) return "";
-    
-    mbedtls_base64_decode(decoded, decodedLen, &decodedLen, (const unsigned char*)ciphertextBase64.c_str(), ciphertextBase64.length());
+    unsigned char dynamic_key[32];
+    get_aes_key(dynamic_key);
     
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_dec(&aes, aes_key, 256);
+    mbedtls_aes_setkey_dec(&aes, dynamic_key, 256);
     
-    unsigned char iv[16];
-    memcpy(iv, decoded, 16);
+    uint8_t iv[16];
+    memcpy(iv, ciphertext, 16);
     
-    size_t cipherLen = decodedLen - 16;
-    unsigned char* output = (unsigned char*)malloc(cipherLen);
+    size_t encLen = cipherLen - 16;
+    uint8_t* output = (uint8_t*)malloc(encLen);
     if (!output) {
-        free(decoded);
         mbedtls_aes_free(&aes);
-        return "";
+        *outPlaintext = nullptr;
+        return 0;
     }
     
-    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, cipherLen, iv, decoded + 16, output);
+    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, encLen, iv, &ciphertext[16], output);
     mbedtls_aes_free(&aes);
     
-    uint8_t padding = output[cipherLen - 1];
-    String result = "";
-    if (padding <= 16 && padding <= cipherLen) {
-        result = String((char*)output, cipherLen - padding);
+    uint8_t padding = output[encLen - 1];
+    if (padding > 16 || padding > encLen) {
+        free(output);
+        *outPlaintext = nullptr;
+        return 0;
     }
     
-    free(decoded);
+    size_t plainLen = encLen - padding;
+    uint8_t* result = (uint8_t*)malloc(plainLen);
+    if (!result) {
+        free(output);
+        *outPlaintext = nullptr;
+        return 0;
+    }
+    
+    memcpy(result, output, plainLen);
     free(output);
-    return result;
+    
+    *outPlaintext = result;
+    return plainLen;
 }

@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include <WebSocketsServer.h>
-#include <mutex>
 #include "PortalConfig.h"
 #include "PortalHID.h"
 
@@ -11,7 +10,6 @@ public:
     PortalWebSocket(
         SkylanderSlot*     slots,
         volatile uint8_t&  changeCounter,
-        std::mutex&        portalMutex,
         uint16_t           port = HTTP_PORT
     );
 
@@ -22,17 +20,19 @@ private:
     WebSocketsServer   _webSocket;
     SkylanderSlot*     _slots;
     volatile uint8_t&  _changeCounter;
-    std::mutex&        _mutex;
     
     uint8_t _lastChangeCounter;
+    bool    _lastModifiedState[NUM_SLOTS] = {false};
 
     void _onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
     void _broadcastSlots();
     
     // AES Encryption helpers
-    String _encryptAES(const String& payload);
-    String _decryptAES(const String& ciphertextBase64);
+    // Returns length of allocated buffer, caller must free(*outCiphertext)
+    size_t _encryptAES(const uint8_t* payload, size_t payloadLen, uint8_t** outCiphertext);
+    // Returns length of allocated buffer, caller must free(*outPlaintext)
+    size_t _decryptAES(const uint8_t* ciphertext, size_t cipherLen, uint8_t** outPlaintext);
     
     // API commands
-    void _handleMessage(uint8_t num, const String& msg);
+    void _handleMessage(uint8_t num, const uint8_t* payload, size_t length);
 };
