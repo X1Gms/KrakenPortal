@@ -183,12 +183,6 @@ void PortalWebSocket::_handleMessage(uint8_t num, const uint8_t* payload, size_t
                     _changeCounter++;
                     
                     Serial.printf("[KRAKEN-WS] Slot %d loaded via API: %s\n", slot, fname);
-                    Serial.println("[KRAKEN-WS] HEX DUMP OF INSERTED FIGURE:");
-                    for (int blk = 0; blk < 64; blk++) {
-                        Serial.printf("Block %02d: ", blk);
-                        for(int i=0; i<16; i++) { Serial.printf("%02X ", _slots[slot - 1].dump_data[blk*16 + i]); }
-                        Serial.println();
-                    }
                 }
                 success = true;
             }
@@ -202,12 +196,6 @@ void PortalWebSocket::_handleMessage(uint8_t num, const uint8_t* payload, size_t
                     _slots[slot - 1].is_modified = false;
                     
                     Serial.printf("[KRAKEN-WS] Slot %d auto-synced to App\n", slot);
-                    Serial.println("[KRAKEN-WS] HEX DUMP OF SYNCED FIGURE:");
-                    for (int blk = 0; blk < 64; blk++) {
-                        Serial.printf("Block %02d: ", blk);
-                        for(int i=0; i<16; i++) { Serial.printf("%02X ", responseData[blk*16 + i]); }
-                        Serial.println();
-                    }
                     success = true;
                 }
             }

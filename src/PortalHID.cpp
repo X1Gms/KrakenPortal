@@ -288,10 +288,6 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
             if (slot < NUM_SLOTS && _slots[slot].occupied && blk < 64) {
                 resp[1] = rawIdx; // Echo raw index expected by game
                 memcpy(&resp[3], &_slots[slot].dump_data[blk * 16], 16);
-                
-                Serial.printf("[HID-READ] PS3 read Slot %d, Block %02d | Hex: ", slot, blk);
-                for(int i=0; i<16; i++) { Serial.printf("%02X ", resp[3+i]); }
-                Serial.println();
             } else {
                 resp[1] = 0x01; // Slot empty or block out of range
             }
