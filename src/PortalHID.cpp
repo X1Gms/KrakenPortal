@@ -185,11 +185,9 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_t
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    (void)instance; (void)report_id;
-    if (report_type == HID_REPORT_TYPE_OUTPUT || report_type == HID_REPORT_TYPE_FEATURE) {
-        if (g_portalInstance) {
-            g_portalInstance->handleOutput(buffer, bufsize);
-        }
+    (void)instance; (void)report_id; (void)report_type;
+    if (g_portalInstance) {
+        g_portalInstance->handleOutput(buffer, bufsize);
     }
 }
 
@@ -212,18 +210,36 @@ SkylandersPortal::SkylandersPortal(
 }
 
 void SkylandersPortal::begin() {
-    // USB.begin() is called in main.cpp after descriptors are set
+    _lastChangeCounter = _changeCounter;
     Serial.println("[HID] USB HID Portal of Power initialized.");
 }
 
 void SkylandersPortal::handleOutput(const uint8_t* buffer, uint16_t len) {
-    uint16_t offset = 0;
-    // Fix unsigned underflow: compare offset directly to len
-    while (offset < len) {
-        _usbCommandCounter++;
-        _handleCommand(buffer + offset, len - offset);
-        offset += 32;
+    _usbCommandCounter++;
+
+    // Audio stream from Traptanium Portal (PS3 / Wii / Wii U):
+    // 1. Packets longer than 32 bytes are always raw audio OUT transfers (64 bytes)
+    if (len > 32) {
+        if (_audioCallback) {
+            _audioCallback(buffer, len);
+        }
+        return;
     }
+
+    // 2. While speaker is active, capture 32-byte audio packets as well
+    if (_speakerActive) {
+        uint8_t c = buffer[0];
+        // If not a known portal command character, treat as 32-byte PCM audio chunk
+        if (c != 'M' && c != 'L' && c != 'Q' && c != 'W' && c != 'R' && 
+            c != 'A' && c != 'S' && c != 'C' && c != 'J' && c != 'V') {
+            if (_audioCallback) {
+                _audioCallback(buffer, len);
+            }
+            return;
+        }
+    }
+
+    _handleCommand(buffer, len);
 }
 
 uint16_t SkylandersPortal::handleGetFeature(uint8_t* buffer, uint16_t len) {
@@ -260,33 +276,35 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         }
         break;
 
-    case 'A': // Activate Portal / LED Colors
+    case 'A': // Activate Portal / LED Colors (Matches KAOS)
         _portalActive = (cmd[1] == 0x01);
         resp[0] = 0x41;
         resp[1] = cmd[1];
         resp[2] = 0xFF;
-        resp[3] = 0x00;
+        resp[3] = 0x77;
         break;
 
-    case 'S': // Query Status
+    case 'S': // Query Status (Matches KAOS)
         buildStatusReport(resp, true); // <--- TRUE means it's an explicit query from the game
         break;
 
-    case 'Q': // Read 16-byte block from Skylander figure
+    case 'Q': // Read 16-byte block from Skylander figure (Matches KAOS)
         {
             uint8_t rawIdx = cmd[1];
             uint8_t blk    = cmd[2];
-            uint8_t slot = rawIdx & 0x0F;
+            uint8_t slot   = rawIdx & 0x0F;
 
+            // When the game reads block 0, it has recognized the figure!
+            // Transition status from 0x3 (ADDED) to 0x1 (READY)
             if (blk == 0 && slot < NUM_SLOTS) {
                 _arrivalPending[slot] = false;
             }
 
             resp[0] = 'Q';
+            resp[1] = (uint8_t)(0x10 | slot); // Matches KAOS: response slot is 0x10 | slot
             resp[2] = blk;
 
-            if (slot < NUM_SLOTS && _slots[slot].occupied && blk < 64) {
-                resp[1] = rawIdx; // Echo raw index expected by game
+            if (slot < NUM_SLOTS && _slots[slot].occupied && blk < (FIGURE_SIZE / 16)) {
                 memcpy(&resp[3], &_slots[slot].dump_data[blk * 16], 16);
             } else {
                 resp[1] = 0x01; // Slot empty or block out of range
@@ -294,19 +312,20 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         }
         break;
 
-    case 'W': // Write 16-byte block to Skylander figure
+    case 'W': // Write 16-byte block to Skylander figure (Matches KAOS)
         {
             uint8_t rawIdx = cmd[1];
             uint8_t blk    = cmd[2];
-            uint8_t slot = rawIdx & 0x0F;
+            uint8_t slot   = rawIdx & 0x0F;
 
-            Serial.printf("[HID-WRITE] PS3 wrote Slot %d, Block %02d | Hex: ", slot, blk);
-            for(int i=0; i<16; i++) { Serial.printf("%02X ", cmd[3+i]); }
-            Serial.println();
+            if (slot < NUM_SLOTS && blk < (FIGURE_SIZE / 16)) {
+                Serial.printf("[HID-WRITE] PS3 wrote Slot %d, Block %02d\n", slot, blk);
+            }
 
             resp[0] = 'W';
-            resp[1] = rawIdx; // Echo raw index expected by game
+            resp[1] = (uint8_t)(0x10 | slot); // Matches KAOS: outbuffer[1] = 0x10 | slot
             resp[2] = blk;
+            memcpy(&resp[3], &cmd[3], 16);     // Matches KAOS: Echo complete 16-byte payload back to console
 
             if (slot < NUM_SLOTS && blk < (FIGURE_SIZE / 16)) {
                 if (_slots[slot].occupied) {
@@ -318,14 +337,34 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
         }
         break;
 
-    case 'J': // Challenge / Crypto Response
-        resp[0] = 'J';
-        resp[1] = cmd[1];
+    case 'M': // Activate / Deactivate speaker
+        resp[0] = 'M';
+        resp[1] = cmd[1]; // Echo requested state (e.g. 0x01 = active)
+        resp[2] = 0x00;
+        resp[3] = 0x19;   // Audio Firmware version (v1.25 / v0.25 from Traptanium portal)
+        Serial.printf("[HID] Host sent 'M' speaker command: state=0x%02X\n", cmd[1]);
+        if (cmd[1] != 0) {
+            _speakerActive = true;
+        } else {
+            _speakerActive = false;
+            if (_audioEndCallback) {
+                _audioEndCallback();
+            }
+        }
         break;
 
-    case 'C':
-    case 'L':
-    case 'M':
+    case 'C': // Skylander Portal Color (Matches KAOS)
+        memcpy(resp, cmd, 32);
+        break;
+
+    case 'J': // Challenge / Sound (Matches KAOS)
+        resp[0] = 'J';
+        break;
+
+    case 'L': // Light (Active during audio streaming, matches Dolphin)
+        memcpy(resp, cmd, 32);
+        break;
+
     case 'V':
     default:
         hasResp = false;
@@ -333,11 +372,12 @@ void SkylandersPortal::_handleCommand(const uint8_t* cmd, uint16_t len) {
     }
 
     if (hasResp) {
-        if (tud_hid_n_ready(0)) {
-            tud_hid_n_report(0, 0, resp, 32);
-        } else {
-            Serial.println("[ERROR] HID NOT READY, DROPPED RESPONSE");
+        int timeout_us = 10000;
+        while (!tud_hid_n_ready(0) && timeout_us > 0) {
+            delayMicroseconds(50);
+            timeout_us -= 50;
         }
+        tud_hid_n_report(0, 0, resp, 32);
     }
 }
 
@@ -352,30 +392,26 @@ void SkylandersPortal::buildStatusReport(uint8_t out[32], bool is_query) {
 
         if (loaded && !_wasLoaded[i]) {
             _arrivalPending[i] = true;
-            _removalPending[i] = false; // <-- MATA O FANTASMA DA REMOÇÃO
-            Serial.printf("[STATE] Slot %d INSERTED\n", i);
+            _removalPending[i] = false;
+            Serial.printf("[STATE] Slot %d INSERTED (flag 0x03 ADDED)\n", i);
         }
         if (!loaded && _wasLoaded[i]) {
             _removalPending[i] = true;
-            _arrivalPending[i] = false; // <-- MATA O FANTASMA DA INSERÇÃO
-            Serial.printf("[STATE] Slot %d REMOVED\n", i);
+            _arrivalPending[i] = false;
+            Serial.printf("[STATE] Slot %d REMOVED (flag 0x02 REMOVING)\n", i);
         }
         _wasLoaded[i] = loaded;
 
         uint32_t slotBits = 0;
         if (_arrivalPending[i]) {
-            slotBits = 0x3; // Arrival flag
-            // DO NOT clear _arrivalPending here! 
-            // It MUST remain true until the game successfully reads Block 0 using 'Q' command!
+            slotBits = 0x3; // Arrival flag (3 = 0b11 = ADDED, matches Dolphin & Traptanium)
         } else if (_removalPending[i]) {
-            slotBits = 0x2; // Removal flag
+            slotBits = 0x2; // Removal flag (2 = 0b10 = REMOVING)
             if (is_query) {
-                // Only clear the removal flag if the host explicitly asked for an 'S' report,
-                // ensuring the host definitely received it.
                 _removalPending[i] = false;
             }
         } else if (loaded) {
-            slotBits = 0x1; // Loaded & present
+            slotBits = 0x1; // Loaded & present (1 = 0b01 = READY)
         }
 
         bits |= (slotBits << (i * 2));
@@ -405,13 +441,15 @@ void SkylandersPortal::loop() {
             }
         }
 
+        // When a figure is inserted or removed, push a Sense report immediately to the console
+        // (Matches KAOS: "Needs to send Sense as soon as a skylander is loaded to be detected")
         if (_changeCounter != _lastChangeCounter) {
             if (tud_hid_n_ready(0)) {
                 _lastChangeCounter = _changeCounter;
                 uint8_t statusPkt[32];
-                buildStatusReport(statusPkt, false); // false = Background push, do not clear removal flags
+                buildStatusReport(statusPkt, false);
                 tud_hid_n_report(0, 0, statusPkt, 32);
-                Serial.println("[HID] Pushed unsolicited state change to PS3");
+                Serial.println("[HID] Pushed Sense (figure changed) to console");
             }
         }
     }

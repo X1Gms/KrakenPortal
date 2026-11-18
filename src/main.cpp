@@ -43,6 +43,13 @@ void setup() {
     portal      = new SkylandersPortal(slots, changeCounter, usbCommandCounter, pType);
     wsApi       = new PortalWebSocket(slots, changeCounter, HTTP_PORT);
 
+    portal->setAudioCallback([](const uint8_t* data, size_t len) {
+        if (wsApi) wsApi->pushAudio(data, len);
+    });
+    portal->setAudioEndCallback([]() {
+        if (wsApi) wsApi->signalAudioEnd();
+    });
+
     // ── 2. USB Native HID setup (Register HID BEFORE starting USB) ──
     portal->begin();
 
@@ -71,14 +78,14 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
-    // WiFi.setTxPower(WIFI_POWER_8_5dBm); // Removed to allow full TX power and stable connection
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
     WiFi.config(PORTAL_IP, PORTAL_GATEWAY, PORTAL_SUBNET, PORTAL_DNS);
     WiFi.begin(ConfigManager::getSsid().c_str(), ConfigManager::getPassword().c_str());
     Serial.print("[KRAKEN-PORTAL] Connecting to Home WiFi: " + ConfigManager::getSsid());
 
     unsigned long t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
         delay(500);
         Serial.print(".");
     }
@@ -88,11 +95,10 @@ void setup() {
         Serial.println("[KRAKEN-PORTAL] Static IP: http://" + WiFi.localIP().toString() + ":" + String(HTTP_PORT));
     } else {
         Serial.println("[KRAKEN-PORTAL] WiFi connection failed. Please restart or clear config.json to reconfigure.");
-        // We could fallback to AP, but it's better to let them know it failed.
     }
 
     // ── 4. Active Slots are now purely RAM-based ───────────
-    changeCounter = 1; // Signal USB HID status report
+    changeCounter = 0;
 
     // ── 5. Start WebSocket API Server ──────────────────────────────
     wsApi->begin();

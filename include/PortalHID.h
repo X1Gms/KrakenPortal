@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <queue>
 #include <array>
+#include <functional>
 #include "USB.h"
 #include "tusb.h"
 #include "PortalConfig.h"
@@ -39,6 +40,14 @@ public:
     void handleOutput(const uint8_t* buffer, uint16_t len);
     uint16_t handleGetFeature(uint8_t* buffer, uint16_t len);
 
+    // Audio stream callbacks
+    void setAudioCallback(std::function<void(const uint8_t*, size_t)> cb) {
+        _audioCallback = cb;
+    }
+    void setAudioEndCallback(std::function<void()> cb) {
+        _audioEndCallback = cb;
+    }
+
 private:
     SkylanderSlot*     _slots;
     volatile uint8_t&  _changeCounter;
@@ -58,6 +67,10 @@ private:
     unsigned long _lastTimeoutWarnTime = 0;
 
     uint8_t _portalType = 1;
+    bool    _speakerActive = false;
+
+    std::function<void(const uint8_t*, size_t)> _audioCallback = nullptr;
+    std::function<void()> _audioEndCallback = nullptr;
 
     void _handleCommand(const uint8_t* cmd, uint16_t len);
 };

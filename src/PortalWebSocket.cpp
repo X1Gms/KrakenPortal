@@ -3,11 +3,18 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
 
-// We dynamically generate the AES key based on the token
+// We cache the AES key based on the token for high-performance audio streaming
+static unsigned char s_cached_aes_key[32];
+static bool s_key_cached = false;
+
 static void get_aes_key(unsigned char* out_key) {
-    String token = ConfigManager::getToken();
-    if (token == "") token = "SkylanderPortalSuperSecretKey123";
-    mbedtls_sha256((const unsigned char*)token.c_str(), token.length(), out_key, 0);
+    if (!s_key_cached) {
+        String token = ConfigManager::getToken();
+        if (token == "") token = "SkylanderPortalSuperSecretKey123";
+        mbedtls_sha256((const unsigned char*)token.c_str(), token.length(), s_cached_aes_key, 0);
+        s_key_cached = true;
+    }
+    memcpy(out_key, s_cached_aes_key, 32);
 }
 
 PortalWebSocket::PortalWebSocket(
@@ -46,8 +53,8 @@ void PortalWebSocket::loop() {
         lastModifiedCheck = millis();
         for(int i = 0; i < NUM_SLOTS; i++) {
             if (_slots[i].occupied && _slots[i].is_modified) {
-                // Debounce: Only broadcast if the PS3 has stopped writing for 1000ms
-                if (millis() - _slots[i].last_modified_time > 1000) {
+                // Debounce: Only broadcast if the PS3 has stopped writing for 1500ms
+                if (millis() - _slots[i].last_modified_time > 1500) {
                     if (!_lastModifiedState[i]) {
                         _lastModifiedState[i] = true;
                         needsBroadcast = true;
@@ -64,6 +71,40 @@ void PortalWebSocket::loop() {
     
     if (needsBroadcast) {
         _broadcastSlots();
+    }
+
+    // ── Audio Streaming Service ────────────────────────────────────
+    // 1. Process end of speech if silence > 300ms or explicitly signaled by host ('M' 0)
+    if (_audioActive && (_signalEndRequested || (millis() - _lastVoiceTime > 300))) {
+        _signalEndRequested = false;
+        _audioActive = false;
+        // Drain any remaining audio in the ring buffer
+        while (_audioRing.available() > 0) {
+            uint8_t chunk[512];
+            size_t n = _audioRing.read(chunk, sizeof(chunk));
+            _broadcastAudioChunk(chunk, n);
+        }
+        broadcastAudioEnd();
+        Serial.printf("[AUDIO] Voice line finished, sent AUDIO_END (total %u bytes)\n", (unsigned int)_totalVoiceBytes);
+        _totalVoiceBytes = 0;
+    } else if (_signalEndRequested) {
+        _signalEndRequested = false;
+    }
+
+    // 2. Transmit available audio chunks from ring buffer (up to 2 chunks per loop to avoid WiFi starvation)
+    for (int i = 0; i < 2; i++) {
+        size_t avail = _audioRing.available();
+        if (avail >= 512 || (avail > 0 && millis() - _lastAudioSendTime > 40)) {
+            uint8_t chunk[512];
+            size_t toRead = (avail > sizeof(chunk)) ? sizeof(chunk) : avail;
+            size_t n = _audioRing.read(chunk, toRead);
+            if (n > 0) {
+                _broadcastAudioChunk(chunk, n);
+                _lastAudioSendTime = millis();
+            }
+        } else {
+            break;
+        }
     }
 }
 
@@ -105,7 +146,7 @@ void PortalWebSocket::_broadcastSlots() {
         for (int i = 0; i < NUM_SLOTS; i++) {
             plain[offset++] = i + 1;
             plain[offset++] = _slots[i].occupied ? 1 : 0;
-            plain[offset++] = _slots[i].is_modified ? 1 : 0;
+            plain[offset++] = _lastModifiedState[i] ? 1 : 0;
             
             size_t nameLen = _slots[i].file_name.length();
             if (nameLen > 32) nameLen = 32;
@@ -120,6 +161,53 @@ void PortalWebSocket::_broadcastSlots() {
     
     uint8_t* cipher = nullptr;
     size_t cipherLen = _encryptAES(plain, offset, &cipher);
+    if (cipher && cipherLen > 0) {
+        _webSocket.broadcastBIN(cipher, cipherLen);
+        free(cipher);
+    }
+}
+
+void PortalWebSocket::pushAudio(const uint8_t* data, size_t len) {
+    if (!data || len == 0) return;
+
+    if (!_audioActive) {
+        _audioActive = true;
+        _totalVoiceBytes = 0;
+        Serial.println("[AUDIO] Voice stream received from console!");
+    }
+    _lastVoiceTime = millis();
+
+    _audioRing.write(data, len);
+    _totalVoiceBytes += len;
+}
+
+void PortalWebSocket::signalAudioEnd() {
+    _signalEndRequested = true;
+}
+
+void PortalWebSocket::_broadcastAudioChunk(const uint8_t* pcm_data, size_t len) {
+    if (!pcm_data || len == 0) return;
+
+    size_t plainLen = 1 + len;
+    uint8_t* plain = (uint8_t*)malloc(plainLen);
+    if (!plain) return;
+    plain[0] = 0x82; // AUDIO_DATA
+    memcpy(plain + 1, pcm_data, len);
+
+    uint8_t* cipher = nullptr;
+    size_t cipherLen = _encryptAES(plain, plainLen, &cipher);
+    free(plain);
+
+    if (cipher && cipherLen > 0) {
+        _webSocket.broadcastBIN(cipher, cipherLen);
+        free(cipher);
+    }
+}
+
+void PortalWebSocket::broadcastAudioEnd() {
+    uint8_t plain[1] = { 0x83 }; // AUDIO_END
+    uint8_t* cipher = nullptr;
+    size_t cipherLen = _encryptAES(plain, 1, &cipher);
     if (cipher && cipherLen > 0) {
         _webSocket.broadcastBIN(cipher, cipherLen);
         free(cipher);
@@ -194,6 +282,7 @@ void PortalWebSocket::_handleMessage(uint8_t num, const uint8_t* payload, size_t
                     memcpy(responseData, _slots[slot - 1].dump_data, FIGURE_SIZE);
                     responseLen = FIGURE_SIZE;
                     _slots[slot - 1].is_modified = false;
+                    _lastModifiedState[slot - 1] = false;
                     
                     Serial.printf("[KRAKEN-WS] Slot %d auto-synced to App\n", slot);
                     success = true;
